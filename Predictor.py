@@ -11,12 +11,13 @@ import numpy as np
 # Function to parse Darshan log file
 def parse_darshan_log(file_path):
     records = []
-    start_time = None
     
     with open(file_path, 'r') as file:
         for line in file:
             if line.startswith('# start_time:'):
                 start_time = int(line.split()[-1])
+            if line.startswith('# end_time:'):
+                end_time = int(line.split()[-1])
             if line.startswith('#') or not line.strip():
                 continue
             
@@ -33,20 +34,44 @@ def parse_darshan_log(file_path):
                     else:
                         continue
                     
-                    if start_time:
-                        timestamp = datetime.fromtimestamp(start_time)
-                    else:
-                        timestamp = datetime.now()
-                    
-                    records.append((timestamp, operation, counter_value))
+                    records.append((start_time, end_time, operation, counter_value))
                 except (ValueError, IndexError):
                     continue
-    return pd.DataFrame(records, columns=['timestamp', 'operation', 'size'])
+    return records
+
+# Function to calculate intervals
+def calculate_intervals(start_time, end_time, interval_size=300):
+    intervals = []
+    start_interval = start_time // interval_size * interval_size
+    end_interval = end_time // interval_size * interval_size
+    for i in range(start_interval, end_interval + interval_size, interval_size):
+        intervals.append(i)
+    return intervals
+
+# Function to distribute I/O size evenly across intervals
+def evenly_distribute_io(records, interval_size=300):
+    interval_io = {}
+    for start_time, end_time, operation, size in records:
+        intervals = calculate_intervals(start_time, end_time, interval_size)
+        io_per_interval = size / len(intervals)
+        for interval in intervals:
+            if interval not in interval_io:
+                interval_io[interval] = {'read': 0, 'write': 0}
+            interval_io[interval][operation] += io_per_interval
+    return interval_io
+
+# Convert interval I/O to DataFrame
+def interval_io_to_df(interval_io):
+    records = []
+    for interval, ops in interval_io.items():
+        timestamp = datetime.fromtimestamp(interval)
+        records.append((timestamp, ops['read'], ops['write']))
+    return pd.DataFrame(records, columns=['timestamp', 'read', 'write'])
 
 # Function to group I/O operations into 5-minute intervals
 def group_io_operations(df):
     df['time_bin'] = df['timestamp'].dt.floor('5min')
-    grouped = df.groupby(['time_bin', 'operation'])['size'].sum().unstack().fillna(0)
+    grouped = df.groupby(['time_bin'])[['read', 'write']].sum().fillna(0)
     return grouped
 
 # Function to analyze I/O patterns
@@ -115,8 +140,9 @@ def process_all_logs(directory):
     for filename in os.listdir(directory):
         if filename.endswith('.txt'):
             file_path = os.path.join(directory, filename)
-            # print(f"Processing file: {file_path}")
-            df = parse_darshan_log(file_path)
+            records = parse_darshan_log(file_path)
+            interval_io = evenly_distribute_io(records)
+            df = interval_io_to_df(interval_io)
             if not df.empty:
                 all_data.append(df)
     
@@ -149,7 +175,6 @@ def generate_advanced_features(grouped, interval=18):
         X.append(features)
         timestamps.append(grouped.index[i])
         
-        # Determine if a burst occurred at the specified interval (90 minutes = 18 intervals of 5 minutes)
         y_burst_read.append(grouped.iloc[i+interval]['read'] > burst_threshold_read)
         y_burst_write.append(grouped.iloc[i+interval]['write'] > burst_threshold_write)
     
